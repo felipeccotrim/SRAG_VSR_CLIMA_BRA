@@ -16,7 +16,6 @@
 # Execução:
 # source(here::here("01_VSR_SAZONALIDADE_CLIMA.R"))
 
-
 #### 0. CONFIGURAÇÃO INICIAL ####
 
 rm(list = ls())
@@ -73,6 +72,8 @@ MAX_LAG_MENSAL <- 6
 MAX_LAG_SEMANAL <- 8
 PERCENTIL_TEMPORADA <- 0.75
 ATUALIZAR_CLIMA <- FALSE
+VERSAO_SCRIPT <- "2.3.0"
+message("Executando 01_VSR_SAZONALIDADE_CLIMA.R — versão ", VERSAO_SCRIPT)
 
 ORDEM_REGIOES <- c("Norte", "Nordeste", "Centro-Oeste", "Sudeste", "Sul")
 MESES_ABREV_PT <- c("Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez")
@@ -857,6 +858,474 @@ g_heatmap <- ggplot(base_perfil, aes(MES_NOME, variavel, fill = valor_padronizad
 
 salvar_grafico(g_heatmap, "04_heatmap_sazonal", DIR_GRAFICOS_CLIMA, 13, 10)
 
+
+#### 9.1. PERFIS SAZONAIS COM CLASSIFICAÇÃO CLIMÁTICA ####
+
+# A classificação climática combina temperatura e precipitação médias.
+# Dentro de cada região, os meses são classificados em relação às medianas
+# regionais de temperatura e precipitação:
+#   - Frio e chuvoso
+#   - Frio e seco
+#   - Quente e chuvoso
+#   - Quente e seco
+
+# Paleta de alto contraste para projeção em datashow.
+# A transparência é aplicada nos geom_rect(), preservando a legibilidade
+# das linhas e permitindo distinguir as quatro classificações climáticas.
+CORES_ESTACOES <- c(
+  "Frio e chuvoso" = "#2E86C1",   # azul
+  "Frio e seco" = "#AAB7B8",      # cinza azulado
+  "Quente e chuvoso" = "#27AE60", # verde
+  "Quente e seco" = "#F39C12"     # laranja
+)
+
+ALPHA_ESTACOES_SAZONAL <- 0.22
+ALPHA_ESTACOES_TEMPORAL <- 0.20
+
+classificar_estacao_climatica <- function(df, coluna_temp, coluna_prec) {
+  df %>%
+    group_by(REGIAO) %>%
+    mutate(
+      mediana_temp_classificacao = median(.data[[coluna_temp]], na.rm = TRUE),
+      mediana_prec_classificacao = median(.data[[coluna_prec]], na.rm = TRUE),
+      estacao_climatica = case_when(
+        .data[[coluna_temp]] < mediana_temp_classificacao &
+          .data[[coluna_prec]] >= mediana_prec_classificacao ~ "Frio e chuvoso",
+        .data[[coluna_temp]] < mediana_temp_classificacao &
+          .data[[coluna_prec]] < mediana_prec_classificacao ~ "Frio e seco",
+        .data[[coluna_temp]] >= mediana_temp_classificacao &
+          .data[[coluna_prec]] >= mediana_prec_classificacao ~ "Quente e chuvoso",
+        .data[[coluna_temp]] >= mediana_temp_classificacao &
+          .data[[coluna_prec]] < mediana_prec_classificacao ~ "Quente e seco",
+        TRUE ~ NA_character_
+      ),
+      estacao_climatica = factor(
+        estacao_climatica,
+        levels = c("Frio e chuvoso", "Frio e seco", "Quente e chuvoso", "Quente e seco")
+      )
+    ) %>%
+    ungroup()
+}
+
+perfil_sazonal_estacoes <- resumo_sazonal_clima %>%
+  classificar_estacao_climatica("media_temp", "media_precipitacao") %>%
+  group_by(REGIAO) %>%
+  mutate(
+    vsr_z = zscore_seguro(media_casos_vsr),
+    temperatura_z = zscore_seguro(media_temp),
+    umidade_z = zscore_seguro(media_umidade),
+    precipitacao_z = zscore_seguro(media_precipitacao),
+    xmin = MES_NUM - 0.5,
+    xmax = MES_NUM + 0.5
+  ) %>%
+  ungroup()
+
+salvar_csv(
+  perfil_sazonal_estacoes %>%
+    select(
+      REGIAO, MES_NUM, MES_NOME, media_casos_vsr, media_temp,
+      media_umidade, media_precipitacao, estacao_climatica
+    ),
+  "15_perfil_sazonal_classificacao_climatica"
+)
+
+criar_grafico_sazonal_estacoes <- function(
+    base,
+    coluna_clima,
+    titulo_clima,
+    nome_legenda_clima,
+    nome_arquivo
+) {
+  base_longa <- base %>%
+    transmute(
+      REGIAO,
+      MES_NUM,
+      MES_NOME,
+      estacao_climatica,
+      xmin,
+      xmax,
+      `SRAG por VSR` = vsr_z,
+      !!nome_legenda_clima := .data[[coluna_clima]]
+    ) %>%
+    pivot_longer(
+      cols = c(`SRAG por VSR`, all_of(nome_legenda_clima)),
+      names_to = "serie",
+      values_to = "valor_padronizado"
+    )
+  
+  grafico <- ggplot() +
+    geom_rect(
+      data = base,
+      aes(
+        xmin = xmin,
+        xmax = xmax,
+        ymin = -Inf,
+        ymax = Inf,
+        fill = estacao_climatica
+      ),
+      alpha = ALPHA_ESTACOES_SAZONAL,
+      inherit.aes = FALSE
+    ) +
+    geom_hline(yintercept = 0, color = "gray70", linewidth = 0.3) +
+    geom_line(
+      data = base_longa,
+      aes(
+        x = MES_NUM,
+        y = valor_padronizado,
+        color = serie,
+        linetype = serie,
+        group = serie
+      ),
+      linewidth = 0.95
+    ) +
+    geom_point(
+      data = base_longa %>% filter(serie == "SRAG por VSR"),
+      aes(x = MES_NUM, y = valor_padronizado, color = serie),
+      size = 2,
+      inherit.aes = FALSE
+    ) +
+    facet_wrap(~ REGIAO, ncol = 3) +
+    scale_x_continuous(
+      breaks = 1:12,
+      labels = MESES_ABREV_PT,
+      expand = expansion(mult = c(0.01, 0.01))
+    ) +
+    scale_fill_manual(values = CORES_ESTACOES, drop = FALSE) +
+    scale_color_manual(
+      values = setNames(
+        c(
+          "#5E2CA5",
+          dplyr::case_when(
+            nome_legenda_clima == "Temperatura média" ~ "#D55E00",
+            nome_legenda_clima == "Umidade relativa" ~ "#009E73",
+            nome_legenda_clima == "Precipitação" ~ "#0072B2",
+            TRUE ~ "#4D4D4D"
+          )
+        ),
+        c("SRAG por VSR", nome_legenda_clima)
+      )
+    ) +
+    scale_linetype_manual(
+      values = setNames(c("solid", "dashed"), c("SRAG por VSR", nome_legenda_clima))
+    ) +
+    labs(
+      title = paste0("Sazonalidade média de SRAG por VSR e ", titulo_clima, " por região"),
+      subtitle = paste0(
+        "Séries mensais padronizadas por região, Brasil, ",
+        year(DATA_INICIO), "–", year(DATA_FIM),
+        " (excluindo 2020–2021)"
+      ),
+      x = NULL,
+      y = "Valor padronizado",
+      color = NULL,
+      linetype = NULL,
+      fill = "Estação climática",
+      caption = paste0(
+        "Linha contínua: SRAG por VSR; linha tracejada: ",
+        tolower(nome_legenda_clima),
+        ". Estações climáticas definidas pelas medianas regionais de temperatura e precipitação."
+      )
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 15),
+      plot.subtitle = element_text(color = "gray35"),
+      legend.position = "top",
+      strip.text = element_text(face = "bold"),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.caption = element_text(size = 8, color = "gray40")
+    )
+  
+  salvar_grafico(grafico, nome_arquivo, DIR_GRAFICOS_CLIMA, 14, 8)
+  grafico
+}
+
+g_sazonal_temp_estacoes <- criar_grafico_sazonal_estacoes(
+  base = perfil_sazonal_estacoes,
+  coluna_clima = "temperatura_z",
+  titulo_clima = "temperatura média",
+  nome_legenda_clima = "Temperatura média",
+  nome_arquivo = "06_sazonalidade_media_vsr_temperatura_estacoes"
+)
+
+g_sazonal_umidade_estacoes <- criar_grafico_sazonal_estacoes(
+  base = perfil_sazonal_estacoes,
+  coluna_clima = "umidade_z",
+  titulo_clima = "umidade relativa",
+  nome_legenda_clima = "Umidade relativa",
+  nome_arquivo = "07_sazonalidade_media_vsr_umidade_estacoes"
+)
+
+g_sazonal_prec_estacoes <- criar_grafico_sazonal_estacoes(
+  base = perfil_sazonal_estacoes,
+  coluna_clima = "precipitacao_z",
+  titulo_clima = "precipitação mensal",
+  nome_legenda_clima = "Precipitação",
+  nome_arquivo = "08_sazonalidade_media_vsr_precipitacao_estacoes"
+)
+
+#### 9.1.1. PERFIL SAZONAL INTEGRADO: VSR E TRÊS VARIÁVEIS CLIMÁTICAS ####
+
+base_sazonal_integrada <- perfil_sazonal_estacoes %>%
+  transmute(
+    REGIAO,
+    MES_NUM,
+    MES_NOME,
+    estacao_climatica,
+    xmin,
+    xmax,
+    `SRAG por VSR` = vsr_z,
+    `Temperatura média` = temperatura_z,
+    `Umidade relativa` = umidade_z,
+    `Precipitação` = precipitacao_z
+  ) %>%
+  pivot_longer(
+    cols = c(
+      `SRAG por VSR`,
+      `Temperatura média`,
+      `Umidade relativa`,
+      `Precipitação`
+    ),
+    names_to = "serie",
+    values_to = "valor_padronizado"
+  ) %>%
+  mutate(
+    serie = factor(
+      serie,
+      levels = c(
+        "SRAG por VSR",
+        "Temperatura média",
+        "Umidade relativa",
+        "Precipitação"
+      )
+    )
+  )
+
+g_sazonal_integrada <- ggplot() +
+  geom_rect(
+    data = perfil_sazonal_estacoes,
+    aes(
+      xmin = xmin,
+      xmax = xmax,
+      ymin = -Inf,
+      ymax = Inf,
+      fill = estacao_climatica
+    ),
+    alpha = ALPHA_ESTACOES_SAZONAL,
+    inherit.aes = FALSE
+  ) +
+  geom_hline(yintercept = 0, color = "gray70", linewidth = 0.3) +
+  geom_line(
+    data = base_sazonal_integrada,
+    aes(
+      x = MES_NUM,
+      y = valor_padronizado,
+      color = serie,
+      linetype = serie,
+      group = serie
+    ),
+    linewidth = 0.95
+  ) +
+  geom_point(
+    data = base_sazonal_integrada %>% filter(serie == "SRAG por VSR"),
+    aes(x = MES_NUM, y = valor_padronizado, color = serie),
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  facet_wrap(~ REGIAO, ncol = 3) +
+  scale_x_continuous(
+    breaks = 1:12,
+    labels = MESES_ABREV_PT,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_fill_manual(values = CORES_ESTACOES, drop = FALSE) +
+  scale_color_manual(
+    values = c(
+      "SRAG por VSR" = "#5E2CA5",
+      "Temperatura média" = "#D55E00",
+      "Umidade relativa" = "#009E73",
+      "Precipitação" = "#0072B2"
+    ),
+    drop = FALSE
+  ) +
+  scale_linetype_manual(
+    values = c(
+      "SRAG por VSR" = "solid",
+      "Temperatura média" = "longdash",
+      "Umidade relativa" = "dotdash",
+      "Precipitação" = "dotted"
+    ),
+    drop = FALSE
+  ) +
+  labs(
+    title = "Sazonalidade média de SRAG por VSR e variáveis climáticas por região",
+    subtitle = paste0(
+      "Séries mensais padronizadas por região, Brasil, ",
+      year(DATA_INICIO), "–", year(DATA_FIM),
+      " (excluindo 2020–2021)"
+    ),
+    x = NULL,
+    y = "Valor padronizado",
+    color = NULL,
+    linetype = NULL,
+    fill = "Estação climática",
+    caption = paste0(
+      "Linha contínua com pontos: SRAG por VSR. Linhas tracejadas: temperatura média, ",
+      "umidade relativa e precipitação. Estações climáticas definidas pelas medianas ",
+      "regionais de temperatura e precipitação."
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15),
+    plot.subtitle = element_text(color = "gray35"),
+    legend.position = "top",
+    legend.box = "vertical",
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.caption = element_text(size = 8, color = "gray40")
+  )
+
+salvar_grafico(
+  g_sazonal_integrada,
+  "09_sazonalidade_media_vsr_todas_variaveis_estacoes",
+  DIR_GRAFICOS_CLIMA,
+  15,
+  9
+)
+
+#### 9.2. RELAÇÃO TEMPORAL ENTRE VSR E TEMPERATURA POR PERÍODO ####
+
+criar_grafico_temporal_temperatura <- function(
+    base,
+    data_inicio,
+    data_fim,
+    titulo_periodo,
+    nome_arquivo
+) {
+  base_periodo <- base %>%
+    filter(
+      MES >= as.Date(data_inicio),
+      MES <= as.Date(data_fim),
+      !is.na(temp_media),
+      !is.na(precipitacao)
+    )
+  
+  if (nrow(base_periodo) == 0) {
+    warning("Nenhum registro encontrado para o período ", titulo_periodo, ".")
+    return(NULL)
+  }
+  
+  base_periodo <- base_periodo %>%
+    classificar_estacao_climatica("temp_media", "precipitacao") %>%
+    group_by(REGIAO) %>%
+    mutate(
+      `SRAG por VSR` = zscore_seguro(casos_vsr),
+      `Temperatura média` = zscore_seguro(temp_media),
+      xmin = MES,
+      xmax = MES %m+% months(1)
+    ) %>%
+    ungroup()
+  
+  base_longa <- base_periodo %>%
+    select(REGIAO, MES, `SRAG por VSR`, `Temperatura média`) %>%
+    pivot_longer(
+      cols = c(`SRAG por VSR`, `Temperatura média`),
+      names_to = "serie",
+      values_to = "valor_padronizado"
+    )
+  
+  grafico <- ggplot() +
+    geom_rect(
+      data = base_periodo,
+      aes(
+        xmin = xmin,
+        xmax = xmax,
+        ymin = -Inf,
+        ymax = Inf,
+        fill = estacao_climatica
+      ),
+      alpha = ALPHA_ESTACOES_TEMPORAL,
+      inherit.aes = FALSE
+    ) +
+    geom_hline(yintercept = 0, color = "gray70", linewidth = 0.3) +
+    geom_line(
+      data = base_longa,
+      aes(x = MES, y = valor_padronizado, color = serie),
+      linewidth = 0.8
+    ) +
+    facet_wrap(~ REGIAO, ncol = 1) +
+    scale_color_manual(
+      values = c("SRAG por VSR" = "#5E2CA5", "Temperatura média" = "#D55E00")
+    ) +
+    scale_fill_manual(values = CORES_ESTACOES, drop = FALSE) +
+    scale_x_date(
+      date_breaks = "1 year",
+      date_labels = "%Y",
+      expand = expansion(mult = c(0.01, 0.01))
+    ) +
+    labs(
+      title = paste0(
+        "Relação temporal entre SRAG por VSR e temperatura média mensal — ",
+        titulo_periodo
+      ),
+      subtitle = "Séries padronizadas por região com classificação climática mensal baseada em temperatura e precipitação",
+      x = NULL,
+      y = "Valor padronizado",
+      color = NULL,
+      fill = "Estação climática",
+      caption = "Fonte: SIVEP-Gripe e NASA POWER."
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 15),
+      plot.subtitle = element_text(color = "gray35"),
+      legend.position = "top",
+      strip.text = element_text(face = "bold"),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.caption = element_text(size = 8, color = "gray40")
+    )
+  
+  salvar_grafico(grafico, nome_arquivo, DIR_GRAFICOS_CLIMA, 14, 9)
+  
+  salvar_csv(
+    base_periodo %>%
+      select(
+        REGIAO, MES, casos_vsr, temp_media, precipitacao,
+        estacao_climatica, `SRAG por VSR`, `Temperatura média`
+      ),
+    paste0("16_base_temporal_temperatura_", stringr::str_replace_all(titulo_periodo, "[^0-9]+", "_"))
+  )
+  
+  grafico
+}
+
+g_temporal_temp_pre <- criar_grafico_temporal_temperatura(
+  base = base_vsr_clima_mensal,
+  data_inicio = paste0(min(ANOS_PRE), "-01-01"),
+  data_fim = paste0(max(ANOS_PRE), "-12-31"),
+  titulo_periodo = paste0(min(ANOS_PRE), "–", max(ANOS_PRE)),
+  nome_arquivo = "10_relacao_temporal_vsr_temperatura_2013_2019"
+)
+
+g_temporal_temp_pos <- criar_grafico_temporal_temperatura(
+  base = base_vsr_clima_mensal,
+  data_inicio = paste0(min(ANOS_PANDEMIA), "-01-01"),
+  data_fim = as.character(DATA_FIM),
+  titulo_periodo = paste0(min(ANOS_PANDEMIA), "–", year(DATA_FIM)),
+  nome_arquivo = paste0(
+    "11_relacao_temporal_vsr_temperatura_",
+    min(ANOS_PANDEMIA), "_", year(DATA_FIM)
+  )
+)
+
+
 base_mm4 <- base_semanal_sazonal %>%
   arrange(REGIAO, SEMANA) %>%
   group_by(REGIAO) %>%
@@ -1198,6 +1667,9 @@ writexl::write_xlsx(
     Resumo_ACF = acf_resumo,
     Kruskal_meses = tabela_kruskal,
     Resumo_sazonal_clima = resumo_sazonal_clima,
+    Classificacao_climatica = perfil_sazonal_estacoes %>%
+      select(REGIAO, MES_NUM, MES_NOME, media_casos_vsr, media_temp,
+             media_umidade, media_precipitacao, estacao_climatica),
     Spearman_mensal = cor_spearman,
     CCF_mensal = ccf_mensal_resumo,
     CCF_semanal = ccf_semanal_resumo,
@@ -1226,6 +1698,7 @@ objetos_finais <- list(
   stl_regioes = stl_regioes,
   acf_resumo = acf_resumo,
   cor_spearman = cor_spearman,
+  perfil_sazonal_estacoes = perfil_sazonal_estacoes,
   ccf_mensal_resumo = ccf_mensal_resumo,
   ccf_semanal_resumo = ccf_semanal_resumo,
   indicadores_sazonalidade = indicadores_sazonalidade,
@@ -1260,3 +1733,42 @@ message("Projeto: SRAG_VSR_CLIMA_BRA")
 message("Resultados: ", DIR_RESULTADOS)
 message("Excel consolidado: ", arquivo_excel)
 message("============================================================\n")
+
+
+#### 16. VERIFICAÇÃO DOS NOVOS PRODUTOS CLIMÁTICOS ####
+
+arquivos_climaticos_esperados <- file.path(
+  DIR_GRAFICOS_CLIMA,
+  paste0(
+    c(
+      "06_sazonalidade_media_vsr_temperatura_estacoes",
+      "07_sazonalidade_media_vsr_umidade_estacoes",
+      "08_sazonalidade_media_vsr_precipitacao_estacoes",
+      "09_sazonalidade_media_vsr_todas_variaveis_estacoes",
+      "10_relacao_temporal_vsr_temperatura_2013_2019",
+      paste0("11_relacao_temporal_vsr_temperatura_", min(ANOS_PANDEMIA), "_", year(DATA_FIM))
+    ),
+    ".png"
+  )
+)
+
+verificacao_figuras_climaticas <- tibble::tibble(
+  arquivo = arquivos_climaticos_esperados,
+  criado = file.exists(arquivos_climaticos_esperados)
+)
+
+print(verificacao_figuras_climaticas)
+
+if (!all(verificacao_figuras_climaticas$criado)) {
+  warning(
+    "A execução terminou sem gerar todas as seis figuras climáticas novas. ",
+    "Confira as mensagens de erro anteriores e a pasta: ",
+    normalizePath(DIR_GRAFICOS_CLIMA, winslash = "/", mustWork = FALSE)
+  )
+} else {
+  message(
+    "OK: as seis figuras climáticas novas foram criadas em: ",
+    normalizePath(DIR_GRAFICOS_CLIMA, winslash = "/", mustWork = FALSE)
+  )
+}
+
