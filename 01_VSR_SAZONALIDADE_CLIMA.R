@@ -16,6 +16,7 @@
 # Execução:
 # source(here::here("01_VSR_SAZONALIDADE_CLIMA.R"))
 
+
 #### 0. CONFIGURAÇÃO INICIAL ####
 
 rm(list = ls())
@@ -159,10 +160,10 @@ normalizar_uf <- function(x) {
 converter_data_segura <- function(x) {
   if (inherits(x, "Date")) return(x)
   if (inherits(x, c("POSIXct", "POSIXt"))) return(as.Date(x))
-
+  
   x_chr <- stringr::str_trim(as.character(x))
   x_chr[x_chr %in% c("", "NA", "NaN", "NULL")] <- NA_character_
-
+  
   suppressWarnings(
     dplyr::coalesce(
       as.Date(x_chr, format = "%Y-%m-%d"),
@@ -177,18 +178,18 @@ carregar_rdata_objeto <- function(caminho, nomes_preferidos = character()) {
   if (!file.exists(caminho)) {
     stop("Arquivo não encontrado: ", caminho, call. = FALSE)
   }
-
+  
   ambiente_temp <- new.env(parent = emptyenv())
   objetos <- load(caminho, envir = ambiente_temp)
-
+  
   preferido <- intersect(nomes_preferidos, objetos)
   nome_escolhido <- if (length(preferido) > 0) preferido[1] else objetos[1]
   objeto <- get(nome_escolhido, envir = ambiente_temp)
-
+  
   if (!inherits(objeto, c("data.frame", "tbl_df", "data.table"))) {
     stop("O objeto carregado de ", basename(caminho), " não é uma tabela.", call. = FALSE)
   }
-
+  
   message("Carregado: ", basename(caminho), " | objeto: ", nome_escolhido,
           " | linhas: ", format(nrow(objeto), big.mark = "."))
   tibble::as_tibble(objeto)
@@ -196,16 +197,16 @@ carregar_rdata_objeto <- function(caminho, nomes_preferidos = character()) {
 
 harmonizar_base_vsr <- function(df, origem) {
   nomes <- names(df)
-
+  
   coluna_uf <- intersect(c("SG_UF", "SG_UF_NOT", "SG_UF_INTE"), nomes)
   if (length(coluna_uf) == 0) {
     stop("Nenhuma coluna de UF foi encontrada na base ", origem, ".", call. = FALSE)
   }
-
+  
   if (!"DT_SIN_PRI" %in% nomes) {
     stop("A coluna DT_SIN_PRI não foi encontrada na base ", origem, ".", call. = FALSE)
   }
-
+  
   df %>%
     transmute(
       DT_SIN_PRI = converter_data_segura(.data$DT_SIN_PRI),
@@ -368,7 +369,7 @@ calcular_forca_componentes <- function(stl_obj, serie) {
   var_resto <- var(comp[, "remainder"], na.rm = TRUE)
   forca_tendencia <- max(0, 1 - var_resto / var(comp[, "trend"] + comp[, "remainder"], na.rm = TRUE))
   forca_sazonalidade <- max(0, 1 - var_resto / var(comp[, "seasonal"] + comp[, "remainder"], na.rm = TRUE))
-
+  
   tibble(
     serie = serie,
     forca_tendencia = round(forca_tendencia, 3),
@@ -396,16 +397,16 @@ criar_ts_mensal <- function(df) {
 resumir_acf <- function(ts_obj, serie) {
   acf_obj <- acf(ts_obj, lag.max = 48, plot = FALSE)
   banda <- 1.96 / sqrt(length(ts_obj))
-
+  
   extrair_lag <- function(lag_desejado) {
     idx <- which(round(acf_obj$lag * frequency(ts_obj)) == lag_desejado)[1]
     if (is.na(idx)) return(NA_real_)
     as.numeric(acf_obj$acf[idx])
   }
-
+  
   diferenca_12 <- diff(ts_obj, lag = 12)
   ljung <- Box.test(diferenca_12, lag = min(24, floor(length(diferenca_12) / 5)), type = "Ljung-Box")
-
+  
   tibble(
     serie = serie,
     n = length(ts_obj),
@@ -689,11 +690,11 @@ calcular_ccf <- function(df, coluna_data, var_clima, max_lag, unidade) {
   df_valida <- df %>%
     arrange(.data[[coluna_data]]) %>%
     filter(!is.na(casos_vsr), !is.na(.data[[var_clima]]))
-
+  
   if (nrow(df_valida) < 20) {
     return(tibble(lag = NA_real_, ccf = NA_real_, variavel = var_clima, unidade = unidade))
   }
-
+  
   objeto <- ccf(
     x = df_valida[[var_clima]],
     y = df_valida$casos_vsr,
@@ -701,7 +702,7 @@ calcular_ccf <- function(df, coluna_data, var_clima, max_lag, unidade) {
     plot = FALSE,
     na.action = na.omit
   )
-
+  
   tibble(
     lag = as.numeric(objeto$lag),
     ccf = as.numeric(objeto$acf),
@@ -941,7 +942,7 @@ calcular_indicadores_ano <- function(df) {
   df <- arrange(df, SEMANA_EPI)
   semanas_ativas <- df$SEMANA_EPI[df$semana_temporada %in% TRUE]
   idx_pico <- which.max(df$casos_vsr)
-
+  
   tibble(
     semana_inicio = if (length(semanas_ativas) > 0) min(semanas_ativas) else NA_integer_,
     semana_fim = if (length(semanas_ativas) > 0) max(semanas_ativas) else NA_integer_,
@@ -1055,11 +1056,11 @@ comparacao_pre_pos <- resumo_pre_pos %>%
 
 executar_wilcoxon <- function(df, indicador) {
   df_teste <- df %>% filter(!is.na(.data[[indicador]]), !is.na(periodo))
-
+  
   if (n_distinct(df_teste$periodo) < 2) {
     return(tibble(indicador = indicador, estatistica = NA_real_, p_valor = NA_real_))
   }
-
+  
   teste <- suppressWarnings(wilcox.test(df_teste[[indicador]] ~ df_teste$periodo, exact = FALSE))
   tibble(
     indicador = indicador,
@@ -1175,7 +1176,7 @@ criar_boxplot_pre_pos <- function(indicador, titulo, eixo_y, nome_arquivo) {
     labs(title = titulo, x = NULL, y = eixo_y, fill = NULL) +
     theme_minimal(base_size = 12) +
     theme(legend.position = "none", strip.text = element_text(face = "bold"))
-
+  
   salvar_grafico(grafico, nome_arquivo, DIR_GRAFICOS_ANOM, 12, 8)
   grafico
 }
