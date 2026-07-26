@@ -3,20 +3,21 @@
 
 # Autor: Felipe Cotrim
 # Objetivo: executar as análises de sazonalidade da SRAG por VSR e sua associação com temperatura, umidade relativa e precipitação.
-#
-# Estrutura esperada do projeto:
-# SRAG_VSR_CLIMA_BRA/
-# ├── SRAG_VSR_CLIMA_BRA.Rproj
-# ├── 01_VSR_SAZONALIDADE_CLIMA.R
-# ├── BD/
-# │   ├── base_VSR_2013_2018.RData
-# │   └── base_DEF_VSR_2019_2025.RData
-# └── Resultados/
-#
-# Execução:
-# source(here::here("01_VSR_SAZONALIDADE_CLIMA.R"))
 
-#### 0. CONFIGURAÇÃO INICIAL ####
+
+##Estrutura esperada do projeto:
+  # SRAG_VSR_CLIMA_BRA/
+  # ├── SRAG_VSR_CLIMA_BRA.Rproj
+  # ├── 01_VSR_SAZONALIDADE_CLIMA.R
+  # ├── BD/
+  # │   ├── base_VSR_2013_2018.RData
+  # │   └── base_DEF_VSR_2019_2025.RData
+  # └── Resultados/
+  #
+  # Execução:
+  # source(here::here("01_VSR_SAZONALIDADE_CLIMA.R"))
+  
+  #### 0. CONFIGURAÇÃO INICIAL ####
 
 rm(list = ls())
 gc()
@@ -72,7 +73,7 @@ MAX_LAG_MENSAL <- 6
 MAX_LAG_SEMANAL <- 8
 PERCENTIL_TEMPORADA <- 0.75
 ATUALIZAR_CLIMA <- FALSE
-VERSAO_SCRIPT <- "2.3.0"
+VERSAO_SCRIPT <- "2.4.0"
 message("Executando 01_VSR_SAZONALIDADE_CLIMA.R — versão ", VERSAO_SCRIPT)
 
 ORDEM_REGIOES <- c("Norte", "Nordeste", "Centro-Oeste", "Sudeste", "Sul")
@@ -470,79 +471,86 @@ tabela_kruskal <- tibble(
 
 salvar_csv(tabela_kruskal, "07_teste_kruskal_sazonalidade_mensal")
 
-#### 5. DADOS CLIMÁTICOS NASA POWER ####
+#### 5. DADOS CLIMÁTICOS NASA POWER — REPRODUÇÃO DO SCRIPT SARI ####
 
-baixar_clima_mensal <- function(regiao, lon, lat) {
-  message("Baixando clima mensal: ", regiao)
+# IMPORTANTE:
+# Este bloco replica os parâmetros, coordenadas e a estrutura de tratamento
+# utilizados no SARI_RSV_13_25.Rmd. A base bruta baixada é arquivada em BD/
+# para que as próximas execuções usem exatamente os mesmos valores climáticos.
+# Defina ATUALIZAR_CLIMA <- TRUE apenas quando desejar substituir esse arquivo.
+
+COORD_REGIOES <- tibble::tribble(
+  ~REGIAO,         ~lon,    ~lat,
+  "Norte",        -60.0,   -3.5,
+  "Nordeste",     -40.0,   -9.0,
+  "Sudeste",      -45.0,  -22.0,
+  "Sul",          -51.0,  -27.0,
+  "Centro-Oeste", -55.0,  -15.0
+)
+
+ARQ_CLIMA_MENSAL_BRUTO <- file.path(
+  DIR_BD, "clima_nasa_power_SARI_mensal_bruto_2013_2025.rds"
+)
+ARQ_CLIMA_DIARIO_BRUTO <- file.path(
+  DIR_BD, "clima_nasa_power_SARI_diario_bruto_2013_2025.rds"
+)
+
+baixar_clima_regiao <- function(regiao, lon, lat) {
   nasapower::get_power(
     community = "AG",
     lonlat = c(lon, lat),
     pars = c("T2M", "RH2M", "PRECTOTCORR"),
-    dates = c(as.character(DATA_INICIO), as.character(DATA_FIM)),
+    dates = c("2013-01-01", "2025-12-31"),
     temporal_api = "MONTHLY"
   ) %>%
-    as_tibble() %>%
+    tibble::as_tibble() %>%
     janitor::clean_names() %>%
     mutate(REGIAO = regiao)
 }
 
 baixar_clima_diario <- function(regiao, lon, lat) {
-  message("Baixando clima diário: ", regiao)
-  nasapower::get_power(
+  dados <- nasapower::get_power(
     community = "AG",
     lonlat = c(lon, lat),
     pars = c("T2M", "RH2M", "PRECTOTCORR"),
-    dates = c(as.character(DATA_INICIO), as.character(DATA_FIM)),
+    dates = c("2013-01-01", "2025-12-31"),
     temporal_api = "DAILY"
-  ) %>%
-    as_tibble() %>%
-    mutate(REGIAO = regiao)
-}
-
-if (ATUALIZAR_CLIMA || !file.exists(ARQ_CLIMA_MENSAL)) {
-  clima_mensal_bruto <- purrr::pmap_dfr(
-    COORD_REGIOES,
-    ~ baixar_clima_mensal(..1, ..2, ..3)
   )
-  saveRDS(clima_mensal_bruto, ARQ_CLIMA_MENSAL)
-} else {
-  clima_mensal_bruto <- readRDS(ARQ_CLIMA_MENSAL)
-  message("Cache climático mensal carregado: ", ARQ_CLIMA_MENSAL)
+  dados$REGIAO <- regiao
+  dados
 }
 
-if (ATUALIZAR_CLIMA || !file.exists(ARQ_CLIMA_DIARIO)) {
-  clima_diario_bruto <- purrr::pmap_dfr(
+# Base mensal bruta: mesma chamada do SARI.
+if (ATUALIZAR_CLIMA || !file.exists(ARQ_CLIMA_MENSAL_BRUTO)) {
+  message("Baixando a base climática mensal com a rotina original do SARI...")
+  clima_regioes <- purrr::pmap_dfr(
     COORD_REGIOES,
-    ~ baixar_clima_diario(..1, ..2, ..3)
+    ~ baixar_clima_regiao(..1, ..2, ..3)
   )
-  saveRDS(clima_diario_bruto, ARQ_CLIMA_DIARIO)
+  saveRDS(clima_regioes, ARQ_CLIMA_MENSAL_BRUTO)
 } else {
-  clima_diario_bruto <- readRDS(ARQ_CLIMA_DIARIO)
-  message("Cache climático diário carregado: ", ARQ_CLIMA_DIARIO)
+  clima_regioes <- readRDS(ARQ_CLIMA_MENSAL_BRUTO)
+  message("Base climática mensal SARI carregada: ", ARQ_CLIMA_MENSAL_BRUTO)
 }
 
-#### 5.1. TRATAMENTO DO CLIMA MENSAL ####
-
-meses_nasa <- intersect(tolower(month.abb), names(clima_mensal_bruto))
-
-if (length(meses_nasa) != 12) {
-  stop("A estrutura mensal retornada pela NASA POWER não contém os 12 meses esperados.", call. = FALSE)
-}
-
-clima_mensal <- clima_mensal_bruto %>%
-  select(REGIAO, parameter, year, all_of(meses_nasa)) %>%
+# Tratamento mensal equivalente ao RMarkdown original.
+clima_mensal <- clima_regioes %>%
+  select(REGIAO, parameter, year, jan:dec) %>%
   pivot_longer(
-    cols = all_of(meses_nasa),
-    names_to = "mes_nome_nasa",
+    cols = jan:dec,
+    names_to = "mes_nome",
     values_to = "valor"
   ) %>%
   mutate(
     ANO = as.integer(year),
-    MES_NUM = match(mes_nome_nasa, tolower(month.abb)),
-    MES = as.Date(sprintf("%04d-%02d-01", ANO, MES_NUM))
+    MES_NUM = match(mes_nome, tolower(month.abb)),
+    MES = as.Date(paste0(ANO, "-", stringr::str_pad(MES_NUM, 2, pad = "0"), "-01"))
   ) %>%
   select(REGIAO, MES, ANO, MES_NUM, parameter, valor) %>%
-  pivot_wider(names_from = parameter, values_from = valor) %>%
+  pivot_wider(
+    names_from = parameter,
+    values_from = valor
+  ) %>%
   janitor::clean_names() %>%
   rename(
     REGIAO = regiao,
@@ -556,28 +564,45 @@ clima_mensal <- clima_mensal_bruto %>%
   mutate(REGIAO = factor(REGIAO, levels = ORDEM_REGIOES)) %>%
   arrange(REGIAO, MES)
 
-#### 5.2. TRATAMENTO DO CLIMA DIÁRIO E AGREGAÇÃO SEMANAL ####
-
-nomes_clima_diario <- names(clima_diario_bruto)
-
-if (all(c("YEAR", "MM", "DD") %in% nomes_clima_diario)) {
-  clima_diario <- clima_diario_bruto %>%
-    mutate(
-      DATA = as.Date(sprintf("%04d-%02d-%02d", as.integer(YEAR), as.integer(MM), as.integer(DD)))
-    )
-} else if ("YYYYMMDD" %in% nomes_clima_diario) {
-  clima_diario <- clima_diario_bruto %>%
-    mutate(DATA = as.Date(as.character(YYYYMMDD), format = "%Y%m%d"))
+# Base diária bruta: mesma chamada usada na CCF semanal do SARI.
+if (ATUALIZAR_CLIMA || !file.exists(ARQ_CLIMA_DIARIO_BRUTO)) {
+  message("Baixando a base climática diária com a rotina original do SARI...")
+  clima_diario <- purrr::pmap_dfr(
+    COORD_REGIOES,
+    ~ baixar_clima_diario(..1, ..2, ..3)
+  )
+  saveRDS(clima_diario, ARQ_CLIMA_DIARIO_BRUTO)
 } else {
-  stop("Não foi possível identificar as colunas de data do clima diário NASA POWER.", call. = FALSE)
+  clima_diario <- readRDS(ARQ_CLIMA_DIARIO_BRUTO)
+  message("Base climática diária SARI carregada: ", ARQ_CLIMA_DIARIO_BRUTO)
+}
+
+# O SARI utilizou YEAR/MM/DD na correção robusta do clima semanal.
+if (all(c("YEAR", "MM", "DD") %in% names(clima_diario))) {
+  clima_diario <- clima_diario %>%
+    mutate(
+      YEAR = as.integer(YEAR),
+      MM = as.integer(MM),
+      DD = as.integer(DD),
+      DATE = as.Date(sprintf("%04d-%02d-%02d", YEAR, MM, DD))
+    )
+} else if ("YYYYMMDD" %in% names(clima_diario)) {
+  clima_diario <- clima_diario %>%
+    mutate(DATE = as.Date(as.character(YYYYMMDD), format = "%Y%m%d"))
+} else {
+  stop("Não foi possível identificar a data na base diária da NASA POWER.", call. = FALSE)
 }
 
 clima_semanal <- clima_diario %>%
   mutate(
-    REGIAO = factor(stringr::str_trim(as.character(REGIAO)), levels = ORDEM_REGIOES),
-    SEMANA = floor_date(DATA, "week", week_start = 1)
+    REGIAO = stringr::str_trim(as.character(REGIAO)),
+    SEMANA = lubridate::floor_date(DATE, unit = "week", week_start = 1)
   ) %>%
-  filter(!is.na(DATA), SEMANA >= min(grade_semanal), SEMANA <= max(grade_semanal)) %>%
+  filter(
+    !is.na(DATE),
+    SEMANA >= min(grade_semanal),
+    SEMANA <= max(grade_semanal)
+  ) %>%
   group_by(REGIAO, SEMANA) %>%
   summarise(
     temp_media = mean(T2M, na.rm = TRUE),
@@ -585,10 +610,14 @@ clima_semanal <- clima_diario %>%
     precipitacao = sum(PRECTOTCORR, na.rm = TRUE),
     .groups = "drop"
   ) %>%
+  mutate(REGIAO = factor(REGIAO, levels = ORDEM_REGIOES)) %>%
   arrange(REGIAO, SEMANA)
 
-saveRDS(clima_mensal, file.path(DIR_BASES, "clima_mensal_regioes_2013_2025.rds"))
-saveRDS(clima_semanal, file.path(DIR_BASES, "clima_semanal_regioes_2013_2025.rds"))
+# Arquivos tratados e cópias em CSV para auditoria entre versões.
+saveRDS(clima_mensal, file.path(DIR_BASES, "clima_mensal_SARI_2013_2025.rds"))
+saveRDS(clima_semanal, file.path(DIR_BASES, "clima_semanal_SARI_2013_2025.rds"))
+readr::write_csv(clima_mensal, file.path(DIR_TABELAS, "00_clima_mensal_usado_na_analise.csv"))
+readr::write_csv(clima_semanal, file.path(DIR_TABELAS, "00_clima_semanal_usado_na_analise.csv"))
 
 #### 6. INTEGRAÇÃO ENTRE VSR E CLIMA ####
 
@@ -645,7 +674,7 @@ base_mensal_sazonal <- base_vsr_clima_mensal %>%
   filter(!ANO %in% ANOS_PANDEMIA)
 
 base_semanal_sazonal <- base_vsr_clima_semanal %>%
-  filter(!ANO %in% ANOS_PANDEMIA, SEMANA_EPI <= 52)
+  filter(!ANO %in% ANOS_PANDEMIA)
 
 #### 7. PERFIL SAZONAL MÉDIO E CORRELAÇÕES DE SPEARMAN ####
 
