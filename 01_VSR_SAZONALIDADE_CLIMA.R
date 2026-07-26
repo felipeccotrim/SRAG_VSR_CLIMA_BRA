@@ -1,0 +1,1261 @@
+#### PROJETO SRAG_VSR_CLIMA_BRA ####
+#### ANÁLISES DE SAZONALIDADE DO VSR E ASSOCIAÇÃO COM O CLIMA ####
+
+# Autor: Felipe Cotrim
+# Objetivo: executar as análises de sazonalidade da SRAG por VSR e sua associação com temperatura, umidade relativa e precipitação.
+#
+# Estrutura esperada do projeto:
+# SRAG_VSR_CLIMA_BRA/
+# ├── SRAG_VSR_CLIMA_BRA.Rproj
+# ├── 01_VSR_SAZONALIDADE_CLIMA.R
+# ├── BD/
+# │   ├── base_VSR_2013_2018.RData
+# │   └── base_DEF_VSR_2019_2025.RData
+# └── Resultados/
+#
+# Execução:
+# source(here::here("01_VSR_SAZONALIDADE_CLIMA.R"))
+
+#### 0. CONFIGURAÇÃO INICIAL ####
+
+rm(list = ls())
+gc()
+options(stringsAsFactors = FALSE, scipen = 999)
+set.seed(1234)
+
+pacotes <- c(
+  "here", "dplyr", "tidyr", "purrr", "stringr", "lubridate",
+  "ggplot2", "forecast", "slider", "nasapower", "janitor",
+  "scales", "writexl", "readr", "tibble", "rlang"
+)
+
+pacotes_ausentes <- pacotes[!vapply(pacotes, requireNamespace, logical(1), quietly = TRUE)]
+
+if (length(pacotes_ausentes) > 0) {
+  stop(
+    paste0(
+      "Instale os seguintes pacotes antes de executar o script:\n",
+      paste0("install.packages(c(", paste(sprintf('"%s"', pacotes_ausentes), collapse = ", "), "))")
+    ),
+    call. = FALSE
+  )
+}
+
+suppressPackageStartupMessages({
+  library(here)
+  library(dplyr)
+  library(tidyr)
+  library(purrr)
+  library(stringr)
+  library(lubridate)
+  library(ggplot2)
+  library(forecast)
+  library(slider)
+  library(nasapower)
+  library(janitor)
+  library(scales)
+  library(writexl)
+  library(readr)
+  library(tibble)
+  library(rlang)
+})
+
+#### 0.1. PARÂMETROS GERAIS ####
+
+DATA_INICIO <- as.Date("2013-01-01")
+DATA_FIM <- as.Date("2025-12-31")
+ANOS_PANDEMIA <- c(2020L, 2021L)
+ANOS_PRE <- 2013:2019
+ANOS_POS <- 2022:2025
+FREQUENCIA_SEMANAL <- 52
+MAX_LAG_MENSAL <- 6
+MAX_LAG_SEMANAL <- 8
+PERCENTIL_TEMPORADA <- 0.75
+ATUALIZAR_CLIMA <- FALSE
+
+ORDEM_REGIOES <- c("Norte", "Nordeste", "Centro-Oeste", "Sudeste", "Sul")
+MESES_ABREV_PT <- c("Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez")
+
+MAP_UF_REGIAO <- c(
+  AC = "Norte", AL = "Nordeste", AM = "Norte", AP = "Norte",
+  BA = "Nordeste", CE = "Nordeste", DF = "Centro-Oeste",
+  ES = "Sudeste", GO = "Centro-Oeste", MA = "Nordeste",
+  MG = "Sudeste", MS = "Centro-Oeste", MT = "Centro-Oeste",
+  PA = "Norte", PB = "Nordeste", PE = "Nordeste", PI = "Nordeste",
+  PR = "Sul", RJ = "Sudeste", RN = "Nordeste", RO = "Norte",
+  RR = "Norte", RS = "Sul", SC = "Sul", SE = "Nordeste",
+  SP = "Sudeste", TO = "Norte"
+)
+
+COD_UF_SIGLA <- c(
+  "11" = "RO", "12" = "AC", "13" = "AM", "14" = "RR", "15" = "PA",
+  "16" = "AP", "17" = "TO", "21" = "MA", "22" = "PI", "23" = "CE",
+  "24" = "RN", "25" = "PB", "26" = "PE", "27" = "AL", "28" = "SE",
+  "29" = "BA", "31" = "MG", "32" = "ES", "33" = "RJ", "35" = "SP",
+  "41" = "PR", "42" = "SC", "43" = "RS", "50" = "MS", "51" = "MT",
+  "52" = "GO", "53" = "DF"
+)
+
+COORD_REGIOES <- tibble::tribble(
+  ~REGIAO,         ~lon,  ~lat,
+  "Norte",        -60.0,  -3.5,
+  "Nordeste",     -40.0,  -9.0,
+  "Centro-Oeste", -55.0, -15.0,
+  "Sudeste",      -45.0, -22.0,
+  "Sul",          -51.0, -27.0
+)
+
+#### 0.2. CAMINHOS ####
+
+DIR_BD <- here::here("BD")
+DIR_RESULTADOS <- here::here("Resultados")
+DIR_BASES <- file.path(DIR_RESULTADOS, "Bases_processadas")
+DIR_TABELAS <- file.path(DIR_RESULTADOS, "Tabelas")
+DIR_GRAFICOS <- file.path(DIR_RESULTADOS, "Graficos")
+DIR_GRAFICOS_SAZ <- file.path(DIR_GRAFICOS, "01_Sazonalidade")
+DIR_GRAFICOS_CLIMA <- file.path(DIR_GRAFICOS, "02_Clima")
+DIR_GRAFICOS_ANOM <- file.path(DIR_GRAFICOS, "03_Anomalias")
+DIR_LOGS <- file.path(DIR_RESULTADOS, "Logs")
+
+pastas <- c(
+  DIR_BD, DIR_RESULTADOS, DIR_BASES, DIR_TABELAS, DIR_GRAFICOS,
+  DIR_GRAFICOS_SAZ, DIR_GRAFICOS_CLIMA, DIR_GRAFICOS_ANOM, DIR_LOGS
+)
+
+invisible(lapply(pastas, dir.create, recursive = TRUE, showWarnings = FALSE))
+
+ARQ_BASE_1318 <- file.path(DIR_BD, "base_VSR_2013_2018.RData")
+ARQ_BASE_1925 <- file.path(DIR_BD, "base_DEF_VSR_2019_2025.RData")
+ARQ_CLIMA_MENSAL <- file.path(DIR_BD, "clima_nasa_power_mensal_regioes_2013_2025.rds")
+ARQ_CLIMA_DIARIO <- file.path(DIR_BD, "clima_nasa_power_diario_regioes_2013_2025.rds")
+
+#### 0.3. FUNÇÕES GERAIS ####
+
+salvar_grafico <- function(grafico, nome, pasta, largura = 12, altura = 8, dpi = 300) {
+  caminho <- file.path(pasta, paste0(nome, ".png"))
+  ggplot2::ggsave(
+    filename = caminho,
+    plot = grafico,
+    width = largura,
+    height = altura,
+    dpi = dpi,
+    units = "in",
+    bg = "white"
+  )
+  invisible(caminho)
+}
+
+salvar_csv <- function(objeto, nome) {
+  readr::write_csv(objeto, file.path(DIR_TABELAS, paste0(nome, ".csv")), na = "")
+}
+
+normalizar_uf <- function(x) {
+  x <- stringr::str_trim(toupper(as.character(x)))
+  x <- ifelse(x %in% names(COD_UF_SIGLA), unname(COD_UF_SIGLA[x]), x)
+  x[!x %in% names(MAP_UF_REGIAO)] <- NA_character_
+  x
+}
+
+converter_data_segura <- function(x) {
+  if (inherits(x, "Date")) return(x)
+  if (inherits(x, c("POSIXct", "POSIXt"))) return(as.Date(x))
+
+  x_chr <- stringr::str_trim(as.character(x))
+  x_chr[x_chr %in% c("", "NA", "NaN", "NULL")] <- NA_character_
+
+  suppressWarnings(
+    dplyr::coalesce(
+      as.Date(x_chr, format = "%Y-%m-%d"),
+      as.Date(x_chr, format = "%d/%m/%Y"),
+      as.Date(x_chr, format = "%Y/%m/%d"),
+      as.Date(x_chr, format = "%d-%m-%Y")
+    )
+  )
+}
+
+carregar_rdata_objeto <- function(caminho, nomes_preferidos = character()) {
+  if (!file.exists(caminho)) {
+    stop("Arquivo não encontrado: ", caminho, call. = FALSE)
+  }
+
+  ambiente_temp <- new.env(parent = emptyenv())
+  objetos <- load(caminho, envir = ambiente_temp)
+
+  preferido <- intersect(nomes_preferidos, objetos)
+  nome_escolhido <- if (length(preferido) > 0) preferido[1] else objetos[1]
+  objeto <- get(nome_escolhido, envir = ambiente_temp)
+
+  if (!inherits(objeto, c("data.frame", "tbl_df", "data.table"))) {
+    stop("O objeto carregado de ", basename(caminho), " não é uma tabela.", call. = FALSE)
+  }
+
+  message("Carregado: ", basename(caminho), " | objeto: ", nome_escolhido,
+          " | linhas: ", format(nrow(objeto), big.mark = "."))
+  tibble::as_tibble(objeto)
+}
+
+harmonizar_base_vsr <- function(df, origem) {
+  nomes <- names(df)
+
+  coluna_uf <- intersect(c("SG_UF", "SG_UF_NOT", "SG_UF_INTE"), nomes)
+  if (length(coluna_uf) == 0) {
+    stop("Nenhuma coluna de UF foi encontrada na base ", origem, ".", call. = FALSE)
+  }
+
+  if (!"DT_SIN_PRI" %in% nomes) {
+    stop("A coluna DT_SIN_PRI não foi encontrada na base ", origem, ".", call. = FALSE)
+  }
+
+  df %>%
+    transmute(
+      DT_SIN_PRI = converter_data_segura(.data$DT_SIN_PRI),
+      SG_UF = normalizar_uf(.data[[coluna_uf[1]]]),
+      ORIGEM_BASE = origem
+    ) %>%
+    filter(
+      !is.na(DT_SIN_PRI),
+      DT_SIN_PRI >= DATA_INICIO,
+      DT_SIN_PRI <= DATA_FIM
+    ) %>%
+    mutate(
+      REGIAO = unname(MAP_UF_REGIAO[SG_UF]),
+      REGIAO = factor(REGIAO, levels = ORDEM_REGIOES),
+      ANO = year(DT_SIN_PRI),
+      MES_NUM = month(DT_SIN_PRI),
+      MES = floor_date(DT_SIN_PRI, "month"),
+      SEMANA = floor_date(DT_SIN_PRI, "week", week_start = 1)
+    )
+}
+
+zscore_seguro <- function(x) {
+  if (all(is.na(x)) || stats::sd(x, na.rm = TRUE) == 0) return(rep(NA_real_, length(x)))
+  as.numeric(scale(x))
+}
+
+rescale_seguro <- function(x) {
+  if (all(is.na(x)) || diff(range(x, na.rm = TRUE)) == 0) return(rep(0, length(x)))
+  scales::rescale(x, to = c(0, 1))
+}
+
+intensidade_correlacao <- function(r) {
+  case_when(
+    is.na(r) ~ NA_character_,
+    abs(r) < 0.10 ~ "Muito fraca",
+    abs(r) < 0.30 ~ "Fraca",
+    abs(r) < 0.50 ~ "Moderada",
+    abs(r) < 0.70 ~ "Forte",
+    TRUE ~ "Muito forte"
+  )
+}
+
+#### 1. CARREGAMENTO E HARMONIZAÇÃO DAS BASES DE VSR ####
+
+base_2013_2018 <- carregar_rdata_objeto(
+  ARQ_BASE_1318,
+  nomes_preferidos = c("base_VSR_2013_2018")
+)
+
+base_2019_2025 <- carregar_rdata_objeto(
+  ARQ_BASE_1925,
+  nomes_preferidos = c("base_DEF_VSR_2019_2025")
+)
+
+base_vsr <- bind_rows(
+  harmonizar_base_vsr(base_2013_2018, "2013_2018"),
+  harmonizar_base_vsr(base_2019_2025, "2019_2025")
+) %>%
+  arrange(DT_SIN_PRI)
+
+qa_base_vsr <- base_vsr %>%
+  summarise(
+    data_inicio = min(DT_SIN_PRI),
+    data_fim = max(DT_SIN_PRI),
+    registros = n(),
+    uf_ausente = sum(is.na(SG_UF)),
+    regiao_ausente = sum(is.na(REGIAO)),
+    duplicados_exatos = sum(duplicated(base_vsr))
+  )
+
+print(qa_base_vsr)
+salvar_csv(qa_base_vsr, "00_qa_base_vsr")
+saveRDS(base_vsr, file.path(DIR_BASES, "base_vsr_harmonizada_2013_2025.rds"))
+
+#### 2. CONSTRUÇÃO DAS SÉRIES TEMPORAIS ####
+
+grade_mensal <- seq(floor_date(DATA_INICIO, "month"), floor_date(DATA_FIM, "month"), by = "month")
+grade_semanal <- seq(floor_date(DATA_INICIO, "week", week_start = 1), floor_date(DATA_FIM, "week", week_start = 1), by = "1 week")
+
+serie_mensal_br <- base_vsr %>%
+  count(MES, name = "casos_vsr") %>%
+  complete(MES = grade_mensal, fill = list(casos_vsr = 0L)) %>%
+  arrange(MES) %>%
+  mutate(ANO = year(MES), MES_NUM = month(MES))
+
+serie_mensal_regiao <- base_vsr %>%
+  filter(!is.na(REGIAO)) %>%
+  count(REGIAO, MES, name = "casos_vsr") %>%
+  group_by(REGIAO) %>%
+  complete(MES = grade_mensal, fill = list(casos_vsr = 0L)) %>%
+  ungroup() %>%
+  mutate(
+    REGIAO = factor(REGIAO, levels = ORDEM_REGIOES),
+    ANO = year(MES),
+    MES_NUM = month(MES)
+  ) %>%
+  arrange(REGIAO, MES)
+
+serie_semanal_br <- base_vsr %>%
+  count(SEMANA, name = "casos_vsr") %>%
+  complete(SEMANA = grade_semanal, fill = list(casos_vsr = 0L)) %>%
+  arrange(SEMANA) %>%
+  mutate(ANO = year(SEMANA), SEMANA_EPI = epiweek(SEMANA))
+
+serie_semanal_regiao <- base_vsr %>%
+  filter(!is.na(REGIAO)) %>%
+  count(REGIAO, SEMANA, name = "casos_vsr") %>%
+  group_by(REGIAO) %>%
+  complete(SEMANA = grade_semanal, fill = list(casos_vsr = 0L)) %>%
+  ungroup() %>%
+  mutate(
+    REGIAO = factor(REGIAO, levels = ORDEM_REGIOES),
+    ANO = year(SEMANA),
+    SEMANA_EPI = epiweek(SEMANA)
+  ) %>%
+  arrange(REGIAO, SEMANA)
+
+salvar_csv(serie_mensal_br, "01_serie_mensal_brasil")
+salvar_csv(serie_mensal_regiao, "02_serie_mensal_regiao")
+salvar_csv(serie_semanal_br, "03_serie_semanal_brasil")
+salvar_csv(serie_semanal_regiao, "04_serie_semanal_regiao")
+
+#### 3. SAZONALIDADE: DECOMPOSIÇÃO STL ####
+
+criar_ts_semanal <- function(df, coluna_data = "SEMANA", coluna_valor = "casos_vsr") {
+  ts(
+    df[[coluna_valor]],
+    frequency = FREQUENCIA_SEMANAL,
+    start = c(year(min(df[[coluna_data]])), isoweek(min(df[[coluna_data]])))
+  )
+}
+
+stl_br <- stl(criar_ts_semanal(serie_semanal_br), s.window = "periodic", robust = TRUE)
+
+g_stl_br <- forecast::autoplot(stl_br) +
+  labs(title = "Decomposição STL da série semanal de SRAG por VSR — Brasil") +
+  theme_minimal(base_size = 12)
+
+salvar_grafico(g_stl_br, "01_stl_brasil", DIR_GRAFICOS_SAZ, 12, 8)
+
+stl_regioes <- serie_semanal_regiao %>%
+  split(.$REGIAO) %>%
+  purrr::imap(function(df, regiao) {
+    objeto <- stl(criar_ts_semanal(df), s.window = "periodic", robust = TRUE)
+    grafico <- forecast::autoplot(objeto) +
+      labs(title = paste0("Decomposição STL da série semanal de SRAG por VSR — ", regiao)) +
+      theme_minimal(base_size = 12)
+    salvar_grafico(
+      grafico,
+      paste0("02_stl_", janitor::make_clean_names(regiao)),
+      DIR_GRAFICOS_SAZ,
+      12,
+      8
+    )
+    objeto
+  })
+
+calcular_forca_componentes <- function(stl_obj, serie) {
+  comp <- stl_obj$time.series
+  var_resto <- var(comp[, "remainder"], na.rm = TRUE)
+  forca_tendencia <- max(0, 1 - var_resto / var(comp[, "trend"] + comp[, "remainder"], na.rm = TRUE))
+  forca_sazonalidade <- max(0, 1 - var_resto / var(comp[, "seasonal"] + comp[, "remainder"], na.rm = TRUE))
+
+  tibble(
+    serie = serie,
+    forca_tendencia = round(forca_tendencia, 3),
+    forca_sazonalidade = round(forca_sazonalidade, 3)
+  )
+}
+
+forca_stl <- bind_rows(
+  calcular_forca_componentes(stl_br, "Brasil"),
+  purrr::imap_dfr(stl_regioes, ~ calcular_forca_componentes(.x, .y))
+)
+
+salvar_csv(forca_stl, "05_forca_componentes_stl")
+
+#### 4. SAZONALIDADE: ACF, PACF E TESTES ####
+
+criar_ts_mensal <- function(df) {
+  ts(
+    df$casos_vsr,
+    frequency = 12,
+    start = c(year(min(df$MES)), month(min(df$MES)))
+  )
+}
+
+resumir_acf <- function(ts_obj, serie) {
+  acf_obj <- acf(ts_obj, lag.max = 48, plot = FALSE)
+  banda <- 1.96 / sqrt(length(ts_obj))
+
+  extrair_lag <- function(lag_desejado) {
+    idx <- which(round(acf_obj$lag * frequency(ts_obj)) == lag_desejado)[1]
+    if (is.na(idx)) return(NA_real_)
+    as.numeric(acf_obj$acf[idx])
+  }
+
+  diferenca_12 <- diff(ts_obj, lag = 12)
+  ljung <- Box.test(diferenca_12, lag = min(24, floor(length(diferenca_12) / 5)), type = "Ljung-Box")
+
+  tibble(
+    serie = serie,
+    n = length(ts_obj),
+    banda_95 = banda,
+    acf_12 = extrair_lag(12),
+    acf_24 = extrair_lag(24),
+    acf_36 = extrair_lag(36),
+    significativo_12 = abs(acf_12) > banda_95,
+    significativo_24 = abs(acf_24) > banda_95,
+    significativo_36 = abs(acf_36) > banda_95,
+    ljung_box_p_diferenca_12 = ljung$p.value
+  )
+}
+
+ts_mensal_br <- criar_ts_mensal(serie_mensal_br)
+
+g_acf_br <- forecast::ggAcf(ts_mensal_br, lag.max = 48) +
+  labs(title = "ACF mensal da SRAG por VSR — Brasil") +
+  theme_minimal(base_size = 12)
+
+g_pacf_br <- forecast::ggPacf(ts_mensal_br, lag.max = 48) +
+  labs(title = "PACF mensal da SRAG por VSR — Brasil") +
+  theme_minimal(base_size = 12)
+
+g_acf_dif_br <- forecast::ggAcf(diff(ts_mensal_br, lag = 12), lag.max = 48) +
+  labs(title = "ACF após diferença sazonal de 12 meses — Brasil") +
+  theme_minimal(base_size = 12)
+
+salvar_grafico(g_acf_br, "03_acf_mensal_brasil", DIR_GRAFICOS_SAZ, 10, 6)
+salvar_grafico(g_pacf_br, "04_pacf_mensal_brasil", DIR_GRAFICOS_SAZ, 10, 6)
+salvar_grafico(g_acf_dif_br, "05_acf_diferenca_sazonal_brasil", DIR_GRAFICOS_SAZ, 10, 6)
+
+acf_resumo <- bind_rows(
+  resumir_acf(ts_mensal_br, "Brasil"),
+  serie_mensal_regiao %>%
+    split(.$REGIAO) %>%
+    purrr::imap_dfr(~ resumir_acf(criar_ts_mensal(.x), .y))
+) %>%
+  mutate(
+    conclusao = case_when(
+      significativo_12 ~ "Sazonalidade anual evidente",
+      significativo_24 ~ "Periodicidade de 24 meses evidente",
+      TRUE ~ "Sem autocorrelação sazonal clara nos lags avaliados"
+    )
+  )
+
+salvar_csv(acf_resumo, "06_resumo_acf")
+
+mensal_teste <- serie_mensal_br %>%
+  mutate(MES_NUM = factor(MES_NUM, levels = 1:12))
+
+kruskal_meses <- kruskal.test(casos_vsr ~ MES_NUM, data = mensal_teste)
+
+tabela_kruskal <- tibble(
+  teste = "Kruskal-Wallis",
+  estatistica = unname(kruskal_meses$statistic),
+  gl = unname(kruskal_meses$parameter),
+  p_valor = kruskal_meses$p.value
+)
+
+salvar_csv(tabela_kruskal, "07_teste_kruskal_sazonalidade_mensal")
+
+#### 5. DADOS CLIMÁTICOS NASA POWER ####
+
+baixar_clima_mensal <- function(regiao, lon, lat) {
+  message("Baixando clima mensal: ", regiao)
+  nasapower::get_power(
+    community = "AG",
+    lonlat = c(lon, lat),
+    pars = c("T2M", "RH2M", "PRECTOTCORR"),
+    dates = c(as.character(DATA_INICIO), as.character(DATA_FIM)),
+    temporal_api = "MONTHLY"
+  ) %>%
+    as_tibble() %>%
+    janitor::clean_names() %>%
+    mutate(REGIAO = regiao)
+}
+
+baixar_clima_diario <- function(regiao, lon, lat) {
+  message("Baixando clima diário: ", regiao)
+  nasapower::get_power(
+    community = "AG",
+    lonlat = c(lon, lat),
+    pars = c("T2M", "RH2M", "PRECTOTCORR"),
+    dates = c(as.character(DATA_INICIO), as.character(DATA_FIM)),
+    temporal_api = "DAILY"
+  ) %>%
+    as_tibble() %>%
+    mutate(REGIAO = regiao)
+}
+
+if (ATUALIZAR_CLIMA || !file.exists(ARQ_CLIMA_MENSAL)) {
+  clima_mensal_bruto <- purrr::pmap_dfr(
+    COORD_REGIOES,
+    ~ baixar_clima_mensal(..1, ..2, ..3)
+  )
+  saveRDS(clima_mensal_bruto, ARQ_CLIMA_MENSAL)
+} else {
+  clima_mensal_bruto <- readRDS(ARQ_CLIMA_MENSAL)
+  message("Cache climático mensal carregado: ", ARQ_CLIMA_MENSAL)
+}
+
+if (ATUALIZAR_CLIMA || !file.exists(ARQ_CLIMA_DIARIO)) {
+  clima_diario_bruto <- purrr::pmap_dfr(
+    COORD_REGIOES,
+    ~ baixar_clima_diario(..1, ..2, ..3)
+  )
+  saveRDS(clima_diario_bruto, ARQ_CLIMA_DIARIO)
+} else {
+  clima_diario_bruto <- readRDS(ARQ_CLIMA_DIARIO)
+  message("Cache climático diário carregado: ", ARQ_CLIMA_DIARIO)
+}
+
+#### 5.1. TRATAMENTO DO CLIMA MENSAL ####
+
+meses_nasa <- intersect(tolower(month.abb), names(clima_mensal_bruto))
+
+if (length(meses_nasa) != 12) {
+  stop("A estrutura mensal retornada pela NASA POWER não contém os 12 meses esperados.", call. = FALSE)
+}
+
+clima_mensal <- clima_mensal_bruto %>%
+  select(REGIAO, parameter, year, all_of(meses_nasa)) %>%
+  pivot_longer(
+    cols = all_of(meses_nasa),
+    names_to = "mes_nome_nasa",
+    values_to = "valor"
+  ) %>%
+  mutate(
+    ANO = as.integer(year),
+    MES_NUM = match(mes_nome_nasa, tolower(month.abb)),
+    MES = as.Date(sprintf("%04d-%02d-01", ANO, MES_NUM))
+  ) %>%
+  select(REGIAO, MES, ANO, MES_NUM, parameter, valor) %>%
+  pivot_wider(names_from = parameter, values_from = valor) %>%
+  janitor::clean_names() %>%
+  rename(
+    REGIAO = regiao,
+    MES = mes,
+    ANO = ano,
+    MES_NUM = mes_num,
+    temp_media = t2m,
+    umidade_relativa = rh2m,
+    precipitacao = prectotcorr
+  ) %>%
+  mutate(REGIAO = factor(REGIAO, levels = ORDEM_REGIOES)) %>%
+  arrange(REGIAO, MES)
+
+#### 5.2. TRATAMENTO DO CLIMA DIÁRIO E AGREGAÇÃO SEMANAL ####
+
+nomes_clima_diario <- names(clima_diario_bruto)
+
+if (all(c("YEAR", "MM", "DD") %in% nomes_clima_diario)) {
+  clima_diario <- clima_diario_bruto %>%
+    mutate(
+      DATA = as.Date(sprintf("%04d-%02d-%02d", as.integer(YEAR), as.integer(MM), as.integer(DD)))
+    )
+} else if ("YYYYMMDD" %in% nomes_clima_diario) {
+  clima_diario <- clima_diario_bruto %>%
+    mutate(DATA = as.Date(as.character(YYYYMMDD), format = "%Y%m%d"))
+} else {
+  stop("Não foi possível identificar as colunas de data do clima diário NASA POWER.", call. = FALSE)
+}
+
+clima_semanal <- clima_diario %>%
+  mutate(
+    REGIAO = factor(stringr::str_trim(as.character(REGIAO)), levels = ORDEM_REGIOES),
+    SEMANA = floor_date(DATA, "week", week_start = 1)
+  ) %>%
+  filter(!is.na(DATA), SEMANA >= min(grade_semanal), SEMANA <= max(grade_semanal)) %>%
+  group_by(REGIAO, SEMANA) %>%
+  summarise(
+    temp_media = mean(T2M, na.rm = TRUE),
+    umidade_relativa = mean(RH2M, na.rm = TRUE),
+    precipitacao = sum(PRECTOTCORR, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(REGIAO, SEMANA)
+
+saveRDS(clima_mensal, file.path(DIR_BASES, "clima_mensal_regioes_2013_2025.rds"))
+saveRDS(clima_semanal, file.path(DIR_BASES, "clima_semanal_regioes_2013_2025.rds"))
+
+#### 6. INTEGRAÇÃO ENTRE VSR E CLIMA ####
+
+base_vsr_clima_mensal <- serie_mensal_regiao %>%
+  left_join(clima_mensal, by = c("REGIAO", "MES", "ANO", "MES_NUM")) %>%
+  mutate(
+    MES_NOME = factor(MESES_ABREV_PT[MES_NUM], levels = MESES_ABREV_PT),
+    PERIODO = case_when(
+      ANO %in% ANOS_PRE ~ "Pré-pandemia",
+      ANO %in% ANOS_PANDEMIA ~ "Pandemia",
+      ANO %in% ANOS_POS ~ "Pós-pandemia",
+      TRUE ~ NA_character_
+    )
+  )
+
+base_vsr_clima_semanal <- serie_semanal_regiao %>%
+  left_join(clima_semanal, by = c("REGIAO", "SEMANA")) %>%
+  mutate(
+    PERIODO = case_when(
+      ANO %in% ANOS_PRE ~ "Pré-pandemia",
+      ANO %in% ANOS_PANDEMIA ~ "Pandemia",
+      ANO %in% ANOS_POS ~ "Pós-pandemia",
+      TRUE ~ NA_character_
+    )
+  )
+
+qa_integracao <- bind_rows(
+  base_vsr_clima_mensal %>%
+    summarise(
+      base = "Mensal",
+      linhas = n(),
+      sem_temperatura = sum(is.na(temp_media)),
+      sem_umidade = sum(is.na(umidade_relativa)),
+      sem_precipitacao = sum(is.na(precipitacao)),
+      casos = sum(casos_vsr, na.rm = TRUE)
+    ),
+  base_vsr_clima_semanal %>%
+    summarise(
+      base = "Semanal",
+      linhas = n(),
+      sem_temperatura = sum(is.na(temp_media)),
+      sem_umidade = sum(is.na(umidade_relativa)),
+      sem_precipitacao = sum(is.na(precipitacao)),
+      casos = sum(casos_vsr, na.rm = TRUE)
+    )
+)
+
+print(qa_integracao)
+salvar_csv(qa_integracao, "08_qa_integracao_vsr_clima")
+saveRDS(base_vsr_clima_mensal, file.path(DIR_BASES, "base_vsr_clima_mensal.rds"))
+saveRDS(base_vsr_clima_semanal, file.path(DIR_BASES, "base_vsr_clima_semanal.rds"))
+
+base_mensal_sazonal <- base_vsr_clima_mensal %>%
+  filter(!ANO %in% ANOS_PANDEMIA)
+
+base_semanal_sazonal <- base_vsr_clima_semanal %>%
+  filter(!ANO %in% ANOS_PANDEMIA, SEMANA_EPI <= 52)
+
+#### 7. PERFIL SAZONAL MÉDIO E CORRELAÇÕES DE SPEARMAN ####
+
+resumo_sazonal_clima <- base_mensal_sazonal %>%
+  group_by(REGIAO, MES_NUM, MES_NOME) %>%
+  summarise(
+    media_casos_vsr = mean(casos_vsr, na.rm = TRUE),
+    mediana_casos_vsr = median(casos_vsr, na.rm = TRUE),
+    media_temp = mean(temp_media, na.rm = TRUE),
+    media_umidade = mean(umidade_relativa, na.rm = TRUE),
+    media_precipitacao = mean(precipitacao, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+calcular_spearman <- function(x, y) {
+  pares <- complete.cases(x, y)
+  if (sum(pares) < 4) return(tibble(rho = NA_real_, p_valor = NA_real_, n = sum(pares)))
+  teste <- suppressWarnings(cor.test(x[pares], y[pares], method = "spearman", exact = FALSE))
+  tibble(rho = unname(teste$estimate), p_valor = teste$p.value, n = sum(pares))
+}
+
+cor_spearman <- base_mensal_sazonal %>%
+  group_by(REGIAO) %>%
+  group_modify(~ bind_rows(
+    calcular_spearman(.x$casos_vsr, .x$temp_media) %>% mutate(variavel = "Temperatura média"),
+    calcular_spearman(.x$casos_vsr, .x$umidade_relativa) %>% mutate(variavel = "Umidade relativa"),
+    calcular_spearman(.x$casos_vsr, .x$precipitacao) %>% mutate(variavel = "Precipitação")
+  )) %>%
+  ungroup() %>%
+  mutate(
+    rho = round(rho, 3),
+    p_valor = signif(p_valor, 4),
+    intensidade = intensidade_correlacao(rho)
+  ) %>%
+  select(REGIAO, variavel, n, rho, p_valor, intensidade)
+
+salvar_csv(resumo_sazonal_clima, "09_resumo_sazonal_clima")
+salvar_csv(cor_spearman, "10_correlacao_spearman_mensal")
+
+#### 8. CORRELAÇÃO CRUZADA MENSAL E SEMANAL ####
+
+calcular_ccf <- function(df, coluna_data, var_clima, max_lag, unidade) {
+  df_valida <- df %>%
+    arrange(.data[[coluna_data]]) %>%
+    filter(!is.na(casos_vsr), !is.na(.data[[var_clima]]))
+
+  if (nrow(df_valida) < 20) {
+    return(tibble(lag = NA_real_, ccf = NA_real_, variavel = var_clima, unidade = unidade))
+  }
+
+  objeto <- ccf(
+    x = df_valida[[var_clima]],
+    y = df_valida$casos_vsr,
+    lag.max = max_lag,
+    plot = FALSE,
+    na.action = na.omit
+  )
+
+  tibble(
+    lag = as.numeric(objeto$lag),
+    ccf = as.numeric(objeto$acf),
+    variavel = var_clima,
+    unidade = unidade
+  )
+}
+
+ccf_mensal <- base_mensal_sazonal %>%
+  group_by(REGIAO) %>%
+  group_modify(~ bind_rows(
+    calcular_ccf(.x, "MES", "temp_media", MAX_LAG_MENSAL, "meses"),
+    calcular_ccf(.x, "MES", "umidade_relativa", MAX_LAG_MENSAL, "meses"),
+    calcular_ccf(.x, "MES", "precipitacao", MAX_LAG_MENSAL, "meses")
+  )) %>%
+  ungroup()
+
+ccf_semanal <- base_semanal_sazonal %>%
+  group_by(REGIAO) %>%
+  group_modify(~ bind_rows(
+    calcular_ccf(.x, "SEMANA", "temp_media", MAX_LAG_SEMANAL, "semanas"),
+    calcular_ccf(.x, "SEMANA", "umidade_relativa", MAX_LAG_SEMANAL, "semanas"),
+    calcular_ccf(.x, "SEMANA", "precipitacao", MAX_LAG_SEMANAL, "semanas")
+  )) %>%
+  ungroup()
+
+rotulos_variaveis <- c(
+  temp_media = "Temperatura média",
+  umidade_relativa = "Umidade relativa",
+  precipitacao = "Precipitação"
+)
+
+resumir_ccf <- function(df) {
+  df %>%
+    filter(!is.na(ccf)) %>%
+    group_by(REGIAO, variavel, unidade) %>%
+    slice_max(abs(ccf), n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    mutate(
+      variavel = recode(variavel, !!!rotulos_variaveis),
+      ccf = round(ccf, 3),
+      intensidade = intensidade_correlacao(ccf),
+      interpretacao = case_when(
+        lag > 0 & ccf > 0 ~ "Aumento da variável climática antecede aumento do VSR",
+        lag > 0 & ccf < 0 ~ "Redução da variável climática antecede aumento do VSR",
+        lag < 0 ~ "VSR antecede a variável climática; interpretar com cautela",
+        TRUE ~ "Associação contemporânea"
+      )
+    )
+}
+
+ccf_mensal_resumo <- resumir_ccf(ccf_mensal)
+ccf_semanal_resumo <- resumir_ccf(ccf_semanal)
+
+salvar_csv(ccf_mensal, "11_ccf_mensal_completa")
+salvar_csv(ccf_mensal_resumo, "12_ccf_mensal_resumo")
+salvar_csv(ccf_semanal, "13_ccf_semanal_completa")
+salvar_csv(ccf_semanal_resumo, "14_ccf_semanal_resumo")
+
+g_ccf_semanal <- ccf_semanal %>%
+  filter(!is.na(ccf)) %>%
+  mutate(variavel = recode(variavel, !!!rotulos_variaveis)) %>%
+  ggplot(aes(lag, ccf)) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  geom_col(width = 0.75, alpha = 0.8) +
+  geom_point(
+    data = ccf_semanal_resumo,
+    aes(lag, ccf),
+    size = 2.5,
+    inherit.aes = FALSE
+  ) +
+  facet_grid(REGIAO ~ variavel) +
+  scale_x_continuous(breaks = seq(-MAX_LAG_SEMANAL, MAX_LAG_SEMANAL, 2)) +
+  labs(
+    title = "Correlação cruzada semanal entre clima e SRAG por VSR",
+    subtitle = "Anos de 2020 e 2021 excluídos",
+    x = "Defasagem em semanas",
+    y = "Correlação cruzada",
+    caption = "Lag positivo: a variável climática antecede a série de VSR."
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold"), panel.grid.minor = element_blank())
+
+salvar_grafico(g_ccf_semanal, "01_ccf_semanal", DIR_GRAFICOS_CLIMA, 14, 10)
+
+#### 9. GRÁFICOS DO PERFIL SAZONAL E CLIMÁTICO ####
+
+base_perfil <- resumo_sazonal_clima %>%
+  group_by(REGIAO) %>%
+  mutate(
+    `SRAG por VSR` = rescale_seguro(media_casos_vsr),
+    `Temperatura média` = rescale_seguro(media_temp),
+    `Umidade relativa` = rescale_seguro(media_umidade),
+    `Precipitação` = rescale_seguro(media_precipitacao)
+  ) %>%
+  ungroup() %>%
+  select(REGIAO, MES_NUM, MES_NOME, `SRAG por VSR`, `Temperatura média`, `Umidade relativa`, `Precipitação`) %>%
+  pivot_longer(
+    cols = c(`SRAG por VSR`, `Temperatura média`, `Umidade relativa`, `Precipitação`),
+    names_to = "variavel",
+    values_to = "valor_padronizado"
+  )
+
+g_perfil_linhas <- ggplot(base_perfil, aes(MES_NUM, valor_padronizado, color = variavel, group = variavel)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.8) +
+  facet_wrap(~ REGIAO, ncol = 2) +
+  scale_x_continuous(breaks = 1:12, labels = MESES_ABREV_PT) +
+  labs(
+    title = "Perfil sazonal médio da SRAG por VSR e variáveis climáticas",
+    subtitle = "Valores reescalados entre 0 e 1 dentro de cada região; 2020–2021 excluídos",
+    x = NULL,
+    y = "Intensidade relativa",
+    color = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", strip.text = element_text(face = "bold"), panel.grid.minor = element_blank())
+
+salvar_grafico(g_perfil_linhas, "02_perfil_sazonal_linhas", DIR_GRAFICOS_CLIMA, 13, 9)
+
+g_perfil_radar <- ggplot(base_perfil, aes(MES_NOME, valor_padronizado, color = variavel, group = variavel)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.7) +
+  coord_polar() +
+  facet_wrap(~ REGIAO, ncol = 2) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent_format()) +
+  labs(
+    title = "Perfil sazonal circular da SRAG por VSR e variáveis climáticas",
+    subtitle = "Valores reescalados entre 0 e 1; 2020–2021 excluídos",
+    x = NULL,
+    y = NULL,
+    color = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", strip.text = element_text(face = "bold"), panel.grid.minor = element_blank())
+
+salvar_grafico(g_perfil_radar, "03_perfil_sazonal_radar", DIR_GRAFICOS_CLIMA, 12, 10)
+
+g_heatmap <- ggplot(base_perfil, aes(MES_NOME, variavel, fill = valor_padronizado)) +
+  geom_tile(linewidth = 0.5, color = "white") +
+  facet_wrap(~ REGIAO, ncol = 1) +
+  scale_fill_gradient(low = "white", high = "black", labels = scales::percent_format()) +
+  labs(
+    title = "Heatmap sazonal da SRAG por VSR e variáveis climáticas",
+    subtitle = "Intensidade relativa mensal por região; 2020–2021 excluídos",
+    x = NULL,
+    y = NULL,
+    fill = "Intensidade"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0), panel.grid = element_blank())
+
+salvar_grafico(g_heatmap, "04_heatmap_sazonal", DIR_GRAFICOS_CLIMA, 13, 10)
+
+base_mm4 <- base_semanal_sazonal %>%
+  arrange(REGIAO, SEMANA) %>%
+  group_by(REGIAO) %>%
+  mutate(
+    casos_vsr_mm4 = slider::slide_dbl(casos_vsr, mean, .before = 3, .complete = FALSE),
+    temp_media_mm4 = slider::slide_dbl(temp_media, mean, .before = 3, .complete = FALSE),
+    umidade_relativa_mm4 = slider::slide_dbl(umidade_relativa, mean, .before = 3, .complete = FALSE),
+    precipitacao_mm4 = slider::slide_dbl(precipitacao, mean, .before = 3, .complete = FALSE)
+  ) %>%
+  ungroup() %>%
+  pivot_longer(
+    cols = c(temp_media_mm4, umidade_relativa_mm4, precipitacao_mm4),
+    names_to = "variavel_climatica",
+    values_to = "valor_clima"
+  ) %>%
+  mutate(
+    variavel_climatica = recode(
+      variavel_climatica,
+      temp_media_mm4 = "Temperatura média",
+      umidade_relativa_mm4 = "Umidade relativa",
+      precipitacao_mm4 = "Precipitação"
+    )
+  ) %>%
+  group_by(REGIAO, variavel_climatica) %>%
+  mutate(
+    VSR = zscore_seguro(casos_vsr_mm4),
+    Clima = zscore_seguro(valor_clima)
+  ) %>%
+  ungroup() %>%
+  select(REGIAO, SEMANA, variavel_climatica, VSR, Clima) %>%
+  pivot_longer(c(VSR, Clima), names_to = "serie", values_to = "valor_padronizado")
+
+g_series_mm4 <- ggplot(base_mm4, aes(SEMANA, valor_padronizado, color = serie)) +
+  geom_line(linewidth = 0.45, alpha = 0.85) +
+  facet_grid(REGIAO ~ variavel_climatica) +
+  labs(
+    title = "Séries semanais de SRAG por VSR e clima",
+    subtitle = "Média móvel de quatro semanas e escore-z; 2020–2021 excluídos",
+    x = NULL,
+    y = "Escore-z",
+    color = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "top", strip.text = element_text(face = "bold"), panel.grid.minor = element_blank())
+
+salvar_grafico(g_series_mm4, "05_series_semanais_mm4", DIR_GRAFICOS_CLIMA, 15, 10)
+
+#### 10. ANOMALIAS CLIMÁTICAS E INDICADORES DA TEMPORADA ####
+
+climatologia_semanal <- base_semanal_sazonal %>%
+  group_by(REGIAO, SEMANA_EPI) %>%
+  summarise(
+    temp_esperada = mean(temp_media, na.rm = TRUE),
+    umidade_esperada = mean(umidade_relativa, na.rm = TRUE),
+    precipitacao_esperada = mean(precipitacao, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+base_anomalias <- base_semanal_sazonal %>%
+  left_join(climatologia_semanal, by = c("REGIAO", "SEMANA_EPI")) %>%
+  mutate(
+    anomalia_temp = temp_media - temp_esperada,
+    anomalia_umidade = umidade_relativa - umidade_esperada,
+    anomalia_precipitacao = precipitacao - precipitacao_esperada,
+    semana_mais_quente = anomalia_temp > 0,
+    semana_mais_umida = anomalia_umidade > 0,
+    semana_mais_chuvosa = anomalia_precipitacao > 0,
+    semana_mais_seca = anomalia_precipitacao < 0
+  )
+
+limiares_temporada <- base_anomalias %>%
+  group_by(REGIAO) %>%
+  summarise(
+    limiar_temporada = quantile(casos_vsr, PERCENTIL_TEMPORADA, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+base_temporada <- base_anomalias %>%
+  left_join(limiares_temporada, by = "REGIAO") %>%
+  mutate(semana_temporada = casos_vsr >= limiar_temporada)
+
+calcular_indicadores_ano <- function(df) {
+  df <- arrange(df, SEMANA_EPI)
+  semanas_ativas <- df$SEMANA_EPI[df$semana_temporada %in% TRUE]
+  idx_pico <- which.max(df$casos_vsr)
+
+  tibble(
+    semana_inicio = if (length(semanas_ativas) > 0) min(semanas_ativas) else NA_integer_,
+    semana_fim = if (length(semanas_ativas) > 0) max(semanas_ativas) else NA_integer_,
+    duracao_temporada = if (length(semanas_ativas) > 0) max(semanas_ativas) - min(semanas_ativas) + 1 else NA_integer_,
+    semana_pico = df$SEMANA_EPI[idx_pico],
+    intensidade_pico = max(df$casos_vsr, na.rm = TRUE),
+    total_anual = sum(df$casos_vsr, na.rm = TRUE),
+    media_anomalia_temp = mean(df$anomalia_temp, na.rm = TRUE),
+    media_anomalia_umidade = mean(df$anomalia_umidade, na.rm = TRUE),
+    media_anomalia_precipitacao = mean(df$anomalia_precipitacao, na.rm = TRUE),
+    semanas_mais_quentes = sum(df$semana_mais_quente, na.rm = TRUE),
+    semanas_mais_umidas = sum(df$semana_mais_umida, na.rm = TRUE),
+    semanas_mais_chuvosas = sum(df$semana_mais_chuvosa, na.rm = TRUE),
+    semanas_mais_secas = sum(df$semana_mais_seca, na.rm = TRUE)
+  )
+}
+
+indicadores_sazonalidade <- base_temporada %>%
+  group_by(REGIAO, ANO) %>%
+  group_modify(~ calcular_indicadores_ano(.x)) %>%
+  ungroup() %>%
+  mutate(
+    periodo = case_when(
+      ANO %in% ANOS_PRE ~ "Pré-pandemia",
+      ANO %in% ANOS_POS ~ "Pós-pandemia",
+      TRUE ~ NA_character_
+    ),
+    periodo = factor(periodo, levels = c("Pré-pandemia", "Pós-pandemia"))
+  )
+
+salvar_csv(climatologia_semanal, "15_climatologia_semanal")
+salvar_csv(base_anomalias, "16_base_anomalias_semanais")
+salvar_csv(indicadores_sazonalidade, "17_indicadores_sazonalidade_anuais")
+
+#### 11. ASSOCIAÇÃO ENTRE ANOMALIAS E INDICADORES SAZONAIS ####
+
+correlacionar_indicadores <- function(df, x, y) {
+  pares <- complete.cases(df[[x]], df[[y]])
+  if (sum(pares) < 4) {
+    return(tibble(indicador_clima = x, indicador_vsr = y, rho = NA_real_, p_valor = NA_real_, n = sum(pares)))
+  }
+  teste <- suppressWarnings(cor.test(df[[x]][pares], df[[y]][pares], method = "spearman", exact = FALSE))
+  tibble(
+    indicador_clima = x,
+    indicador_vsr = y,
+    rho = unname(teste$estimate),
+    p_valor = teste$p.value,
+    n = sum(pares)
+  )
+}
+
+variaveis_clima_ind <- c(
+  "media_anomalia_temp", "media_anomalia_umidade", "media_anomalia_precipitacao",
+  "semanas_mais_quentes", "semanas_mais_umidas", "semanas_mais_chuvosas", "semanas_mais_secas"
+)
+
+variaveis_vsr_ind <- c(
+  "semana_inicio", "semana_pico", "duracao_temporada", "intensidade_pico", "total_anual"
+)
+
+# A construção acima é reescrita abaixo de forma explícita para evitar ambiguidade
+# entre o pronome .x do group_modify e o pronome .x do map.
+cor_anomalias_sazonalidade <- indicadores_sazonalidade %>%
+  group_by(REGIAO) %>%
+  group_modify(function(dados_regiao, chave) {
+    purrr::map_dfr(variaveis_clima_ind, function(var_clima) {
+      purrr::map_dfr(variaveis_vsr_ind, function(var_vsr) {
+        correlacionar_indicadores(dados_regiao, var_clima, var_vsr)
+      })
+    })
+  }) %>%
+  ungroup() %>%
+  mutate(
+    rho = round(rho, 3),
+    p_valor = signif(p_valor, 4),
+    intensidade = intensidade_correlacao(rho)
+  )
+
+salvar_csv(cor_anomalias_sazonalidade, "18_correlacoes_anomalias_indicadores")
+
+#### 12. COMPARAÇÃO PRÉ E PÓS-PANDEMIA ####
+
+indicadores_comparacao <- indicadores_sazonalidade %>%
+  filter(!is.na(periodo))
+
+resumo_pre_pos <- indicadores_comparacao %>%
+  group_by(REGIAO, periodo) %>%
+  summarise(
+    n_anos = n(),
+    media_semana_inicio = mean(semana_inicio, na.rm = TRUE),
+    media_semana_pico = mean(semana_pico, na.rm = TRUE),
+    media_duracao = mean(duracao_temporada, na.rm = TRUE),
+    media_intensidade_pico = mean(intensidade_pico, na.rm = TRUE),
+    media_total_anual = mean(total_anual, na.rm = TRUE),
+    media_anomalia_temp = mean(media_anomalia_temp, na.rm = TRUE),
+    media_anomalia_umidade = mean(media_anomalia_umidade, na.rm = TRUE),
+    media_anomalia_precipitacao = mean(media_anomalia_precipitacao, na.rm = TRUE),
+    media_semanas_quentes = mean(semanas_mais_quentes, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+comparacao_pre_pos <- resumo_pre_pos %>%
+  pivot_longer(
+    cols = -c(REGIAO, periodo, n_anos),
+    names_to = "indicador",
+    values_to = "media"
+  ) %>%
+  select(-n_anos) %>%
+  pivot_wider(names_from = periodo, values_from = media) %>%
+  mutate(diferenca_pos_menos_pre = `Pós-pandemia` - `Pré-pandemia`)
+
+executar_wilcoxon <- function(df, indicador) {
+  df_teste <- df %>% filter(!is.na(.data[[indicador]]), !is.na(periodo))
+
+  if (n_distinct(df_teste$periodo) < 2) {
+    return(tibble(indicador = indicador, estatistica = NA_real_, p_valor = NA_real_))
+  }
+
+  teste <- suppressWarnings(wilcox.test(df_teste[[indicador]] ~ df_teste$periodo, exact = FALSE))
+  tibble(
+    indicador = indicador,
+    estatistica = unname(teste$statistic),
+    p_valor = teste$p.value
+  )
+}
+
+indicadores_teste <- c(
+  "semana_inicio", "semana_pico", "duracao_temporada", "intensidade_pico",
+  "total_anual", "media_anomalia_temp", "media_anomalia_umidade",
+  "media_anomalia_precipitacao", "semanas_mais_quentes"
+)
+
+testes_pre_pos <- indicadores_comparacao %>%
+  group_by(REGIAO) %>%
+  group_modify(function(dados_regiao, chave) {
+    purrr::map_dfr(indicadores_teste, ~ executar_wilcoxon(dados_regiao, .x))
+  }) %>%
+  ungroup() %>%
+  mutate(
+    p_valor = signif(p_valor, 4),
+    significativo_5pct = p_valor < 0.05
+  )
+
+salvar_csv(resumo_pre_pos, "19_resumo_pre_pos")
+salvar_csv(comparacao_pre_pos, "20_diferencas_pos_menos_pre")
+salvar_csv(testes_pre_pos, "21_testes_wilcoxon_pre_pos")
+
+#### 13. GRÁFICOS DE ANOMALIAS E COMPARAÇÃO ####
+
+g_temp_pico <- ggplot(indicadores_comparacao, aes(media_anomalia_temp, semana_pico, color = periodo)) +
+  geom_point(size = 2.7, alpha = 0.85) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.8) +
+  facet_wrap(~ REGIAO) +
+  labs(
+    title = "Anomalia de temperatura e semana do pico de VSR",
+    x = "Anomalia média de temperatura (°C)",
+    y = "Semana epidemiológica do pico",
+    color = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", strip.text = element_text(face = "bold"))
+
+salvar_grafico(g_temp_pico, "01_anomalia_temperatura_semana_pico", DIR_GRAFICOS_ANOM, 12, 8)
+
+g_quentes_intensidade <- ggplot(indicadores_comparacao, aes(semanas_mais_quentes, intensidade_pico, color = periodo)) +
+  geom_point(size = 2.7, alpha = 0.85) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.8) +
+  facet_wrap(~ REGIAO, scales = "free_y") +
+  labs(
+    title = "Semanas mais quentes e intensidade do pico de VSR",
+    x = "Número anual de semanas com anomalia térmica positiva",
+    y = "Maior número semanal de casos",
+    color = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", strip.text = element_text(face = "bold"))
+
+salvar_grafico(g_quentes_intensidade, "02_semanas_quentes_intensidade_pico", DIR_GRAFICOS_ANOM, 12, 8)
+
+indicadores_long <- indicadores_comparacao %>%
+  select(
+    REGIAO, ANO, periodo, semana_inicio, semana_pico, duracao_temporada,
+    intensidade_pico, media_anomalia_temp, media_anomalia_precipitacao,
+    media_anomalia_umidade
+  ) %>%
+  pivot_longer(
+    cols = -c(REGIAO, ANO, periodo),
+    names_to = "indicador",
+    values_to = "valor"
+  ) %>%
+  mutate(
+    indicador = recode(
+      indicador,
+      semana_inicio = "Início da temporada",
+      semana_pico = "Semana do pico",
+      duracao_temporada = "Duração da temporada",
+      intensidade_pico = "Intensidade do pico",
+      media_anomalia_temp = "Anomalia de temperatura",
+      media_anomalia_precipitacao = "Anomalia de precipitação",
+      media_anomalia_umidade = "Anomalia de umidade"
+    )
+  )
+
+g_indicadores_tempo <- ggplot(indicadores_long, aes(ANO, valor, color = periodo, group = periodo)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.8) +
+  facet_grid(indicador ~ REGIAO, scales = "free_y") +
+  scale_x_continuous(breaks = sort(unique(indicadores_long$ANO))) +
+  labs(
+    title = "Indicadores anuais da sazonalidade do VSR e anomalias climáticas",
+    subtitle = "Anos de 2020 e 2021 excluídos",
+    x = NULL,
+    y = NULL,
+    color = NULL
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    legend.position = "top",
+    strip.text = element_text(face = "bold", size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+
+salvar_grafico(g_indicadores_tempo, "03_indicadores_anuais", DIR_GRAFICOS_ANOM, 16, 12)
+
+criar_boxplot_pre_pos <- function(indicador, titulo, eixo_y, nome_arquivo) {
+  grafico <- ggplot(indicadores_comparacao, aes(periodo, .data[[indicador]], fill = periodo)) +
+    geom_boxplot(alpha = 0.75, outlier.shape = NA) +
+    geom_jitter(width = 0.12, alpha = 0.7, size = 1.7) +
+    facet_wrap(~ REGIAO, scales = "free_y") +
+    labs(title = titulo, x = NULL, y = eixo_y, fill = NULL) +
+    theme_minimal(base_size = 12) +
+    theme(legend.position = "none", strip.text = element_text(face = "bold"))
+
+  salvar_grafico(grafico, nome_arquivo, DIR_GRAFICOS_ANOM, 12, 8)
+  grafico
+}
+
+criar_boxplot_pre_pos("semana_pico", "Semana do pico de VSR: pré versus pós-pandemia", "Semana epidemiológica", "04_semana_pico_pre_pos")
+criar_boxplot_pre_pos("intensidade_pico", "Intensidade do pico de VSR: pré versus pós-pandemia", "Casos na semana de pico", "05_intensidade_pico_pre_pos")
+criar_boxplot_pre_pos("duracao_temporada", "Duração da temporada de VSR: pré versus pós-pandemia", "Duração em semanas", "06_duracao_temporada_pre_pos")
+criar_boxplot_pre_pos("media_anomalia_temp", "Anomalia de temperatura: pré versus pós-pandemia", "Anomalia média de temperatura (°C)", "07_anomalia_temperatura_pre_pos")
+
+#### 14. EXPORTAÇÃO CONSOLIDADA ####
+
+arquivo_excel <- file.path(DIR_RESULTADOS, "Resultados_VSR_Sazonalidade_Clima.xlsx")
+
+writexl::write_xlsx(
+  list(
+    QA_base_VSR = qa_base_vsr,
+    QA_integracao = qa_integracao,
+    Forca_STL = forca_stl,
+    Resumo_ACF = acf_resumo,
+    Kruskal_meses = tabela_kruskal,
+    Resumo_sazonal_clima = resumo_sazonal_clima,
+    Spearman_mensal = cor_spearman,
+    CCF_mensal = ccf_mensal_resumo,
+    CCF_semanal = ccf_semanal_resumo,
+    Indicadores_anuais = indicadores_sazonalidade,
+    Cor_anomalias = cor_anomalias_sazonalidade,
+    Resumo_pre_pos = resumo_pre_pos,
+    Diferencas_pre_pos = comparacao_pre_pos,
+    Wilcoxon_pre_pos = testes_pre_pos
+  ),
+  path = arquivo_excel
+)
+
+objetos_finais <- list(
+  parametros = list(
+    data_inicio = DATA_INICIO,
+    data_fim = DATA_FIM,
+    anos_pandemia = ANOS_PANDEMIA,
+    anos_pre = ANOS_PRE,
+    anos_pos = ANOS_POS,
+    percentil_temporada = PERCENTIL_TEMPORADA
+  ),
+  base_vsr = base_vsr,
+  base_vsr_clima_mensal = base_vsr_clima_mensal,
+  base_vsr_clima_semanal = base_vsr_clima_semanal,
+  stl_brasil = stl_br,
+  stl_regioes = stl_regioes,
+  acf_resumo = acf_resumo,
+  cor_spearman = cor_spearman,
+  ccf_mensal_resumo = ccf_mensal_resumo,
+  ccf_semanal_resumo = ccf_semanal_resumo,
+  indicadores_sazonalidade = indicadores_sazonalidade,
+  comparacao_pre_pos = comparacao_pre_pos,
+  testes_pre_pos = testes_pre_pos
+)
+
+saveRDS(objetos_finais, file.path(DIR_RESULTADOS, "objetos_analise_vsr_sazonalidade_clima.rds"))
+
+#### 15. REGISTRO DA EXECUÇÃO ####
+
+capture.output(
+  sessionInfo(),
+  file = file.path(DIR_LOGS, "sessionInfo.txt")
+)
+
+log_execucao <- tibble(
+  data_hora_execucao = Sys.time(),
+  data_inicio_analise = DATA_INICIO,
+  data_fim_analise = DATA_FIM,
+  registros_vsr = nrow(base_vsr),
+  casos_vsr = nrow(base_vsr),
+  arquivo_excel = arquivo_excel,
+  atualizar_clima = ATUALIZAR_CLIMA
+)
+
+readr::write_csv(log_execucao, file.path(DIR_LOGS, "log_execucao.csv"))
+
+message("\n============================================================")
+message("ANÁLISE CONCLUÍDA COM SUCESSO")
+message("Projeto: SRAG_VSR_CLIMA_BRA")
+message("Resultados: ", DIR_RESULTADOS)
+message("Excel consolidado: ", arquivo_excel)
+message("============================================================\n")
