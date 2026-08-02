@@ -274,7 +274,7 @@ fig_dlnm <- ggplot(df_fig, aes(x = temp, y = rr, color = regiao_en, fill = regia
   geom_line(aes(linewidth = regiao_en == "Pooled (national)")) +
   scale_linewidth_manual(values = c(`TRUE` = 1.4, `FALSE` = 0.8), guide = "none") +
   geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
-  labs(x = "Mean weekly temperature (°C)", y = "Relative risk of RSV-associated SARI",
+  labs(x = "Mean weekly temperature (°C)", y = "Relative risk of RSV SARI",
        title = "Exposure-response association between temperature and RSV (reduced DLNM): pooled vs. regional BLUP curves",
        subtitle = paste0("Shaded area = 95% CI. Thicker line = national pooled curve (mixmeta). ",
                           "Centered on the national median (", round(centro_nacional, 1), "°C)."),
@@ -365,7 +365,7 @@ fig_umid_ne <- ggplot(data.frame(umid = grade_umid, rr = pred_umid_ne$allRRfit,
   geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, fill = "steelblue") +
   geom_line(color = "steelblue", linewidth = 1.1) +
   geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
-  labs(x = "Mean weekly relative humidity (%)", y = "Relative risk of RSV-associated SARI",
+  labs(x = "Mean weekly relative humidity (%)", y = "Relative risk of RSV SARI",
        title = "Northeast: humidity-RSV association\n(overall cumulative, reduced DLNM, adjusted for temperature)",
        subtitle = paste0("Centered on the regional median (", round(centro_umid_ne, 1), "%).")) +
   theme_minimal()
